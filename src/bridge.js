@@ -40,8 +40,8 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { buildProvenanceBlock, buildSelfIdentityBlock, selfIdentityPath } from './self-identity.js';
 import {
-  GREETING_RETRY_MS, buildMorningGreetingPrompt, localDateKey, parseGreetingTime,
-  pickGreetingTheme, planMorningGreeting,
+  GREETING_RETRY_MS, WAKE_CALL_DEFAULTS, buildMorningGreetingPrompt, buildWakeCallPrompt,
+  localDateKey, parseGreetingTime, pickGreetingTheme, planMorningGreeting,
 } from './greeting-schedule.js';
 import {
   analyzePersona, applyPurposeOutcome, buildPurposePrompt, collectMaterials, deriveDrives,
@@ -1314,9 +1314,18 @@ function loadConfig() {
   {
     const m = file.greetings?.morning;
     const uin = m ? normalizeIdList([m.uin])[0] : null;
+    // call：叫醒循环（他早安不回就一直叫）。归一化时必须带上，否则会被这里裁剪成 undefined。
+    const callRaw = m?.call;
+    const call = callRaw && typeof callRaw === 'object' && !Array.isArray(callRaw)
+      ? {
+        enabled: callRaw.enabled !== false,
+        everyMin: Math.max(1, Number(callRaw.everyMin) || WAKE_CALL_DEFAULTS.everyMin),
+        maxMinutes: Math.max(1, Number(callRaw.maxMinutes) || WAKE_CALL_DEFAULTS.maxMinutes),
+      }
+      : { enabled: false, everyMin: WAKE_CALL_DEFAULTS.everyMin, maxMinutes: WAKE_CALL_DEFAULTS.maxMinutes };
     cfg.greetings = {
       enabled: file.greetings?.enabled !== false && Boolean(m && uin),
-      morning: m && uin ? { time: String(m.time ?? '08:00'), uin, name: String(m.name ?? '').trim().slice(0, 40) } : null
+      morning: m && uin ? { time: String(m.time ?? '08:00'), uin, name: String(m.name ?? '').trim().slice(0, 40), call } : null
     };
   }
 
@@ -5768,9 +5777,12 @@ async function main() {
             const file = readConfigObject(path.join(ROOT, 'config.json'));
             const m = file.greetings?.morning;
             const uin = m ? normalizeIdList([m.uin])[0] : null;
+            const prevCall = cfg.greetings?.morning?.call;
             cfg.greetings = {
               enabled: file.greetings?.enabled !== false && Boolean(m && uin),
-              morning: m && uin ? { time: String(m.time ?? '08:00'), uin, name: String(m.name ?? '').trim().slice(0, 40) } : null
+              morning: m && uin
+                ? { time: String(m.time ?? '08:00'), uin, name: String(m.name ?? '').trim().slice(0, 40), ...(prevCall ? { call: prevCall } : {}) }
+                : null
             };
             // 临时换对象试发（只影响这一次调用，不写回 config.json）：
             // 目标必须在私聊白名单里，避免变成"任意号码探测"。
@@ -12756,6 +12768,10 @@ async function main() {
   // 每天是否已发落 state/greetings.json（重启不重复、丢了能补）。
   const GREETINGS_STATE_FILE = path.join(STATE_DIR, 'greetings.json');
   let morningGreetingTimer = null;
+  // ── 叫醒循环（greetings.morning.call）────────────────────────────────────
+  // 早安发出后他没回，就每 N 分钟再叫一次，直到他回话或到达时间上限。
+  let wakeCall = null;
+  let lastOwnerInboundAt = 0;
 
   function readGreetingsState() {
     const raw = readJsonSafe(GREETINGS_STATE_FILE, null);
@@ -12893,6 +12909,7 @@ async function main() {
         writeGreetingsState({ lastManualAt: new Date().toISOString(), lastManualOk: true });
       }
       log(`[早安] 已投递 ${key}（主题：${theme}${manual ? '，手动试发' : catchUp ? '，补发' : ''}）`);
+      if (!manual) startWakeCall();
       return { ok: true };
     } catch (error) {
       const message = String(error?.message ?? error);
@@ -12921,6 +12938,57 @@ async function main() {
     }, Math.max(0, plan.fireAt - Date.now()));
     const modeLabel = { scheduled: '准点', catchup: '补发', retry: '重试', tomorrow: '明天' }[plan.mode] ?? plan.mode;
     log(`[早安] 已排定（${modeLabel}）：每天 ${hhmm} → ${conf.uin}（下次 ${new Date(plan.fireAt).toLocaleString()}）`);
+  }
+
+  // ── 叫醒循环 ─────────────────────────────────────────────────────────────
+  // 配置：config.json → greetings.morning.call = { enabled, everyMin, maxMinutes }
+  // 触发后每 everyMin 分钟投一次「接着叫他起床」的提示，他私聊回任何东西就停。
+  function startWakeCall() {
+    const m = cfg.greetings?.morning;
+    const conf = m?.call ?? {};
+    if (!m || conf.enabled === false) return;
+    stopWakeCall('重新开始');
+    const everyMin = Math.max(1, Number(conf.everyMin) || WAKE_CALL_DEFAULTS.everyMin);
+    const maxMinutes = Math.max(everyMin, Number(conf.maxMinutes) || WAKE_CALL_DEFAULTS.maxMinutes);
+    wakeCall = { uin: String(m.uin), startedAt: Date.now(), count: 0, everyMin, maxMinutes, timer: null };
+    wakeCall.timer = setTimeout(() => { void wakeCallTick(); }, everyMin * 60 * 1000);
+    log(`[叫醒] 开始：每 ${everyMin} 分钟一次，最多 ${maxMinutes} 分钟（他回话就停）`);
+  }
+
+  function stopWakeCall(reason) {
+    if (!wakeCall) return;
+    const { timer, count } = wakeCall;
+    wakeCall = null;
+    if (timer) clearTimeout(timer);
+    log(`[叫醒] 结束：${reason}（已叫 ${count} 次）`);
+  }
+
+  async function wakeCallTick() {
+    const state = wakeCall;
+    if (!state) return;
+    if (lastOwnerInboundAt >= state.startedAt) { stopWakeCall('他回话了'); return; }
+    const elapsedMin = Math.round((Date.now() - state.startedAt) / 60000);
+    if (elapsedMin >= state.maxMinutes) { stopWakeCall(`到 ${state.maxMinutes} 分钟上限`); return; }
+    const key = `private:${state.uin}`;
+    state.count += 1;
+    const attempt = state.count;
+    const token = currentMode === 'reserved2' ? (getSocialV2State(key)?.agentToken ?? '') : '';
+    try {
+      await deliverPrompt(key, buildWakeCallPrompt({
+        who: cfg.greetings?.morning?.name ?? '',
+        uin: state.uin,
+        attempt,
+        elapsedMin,
+        mode: currentMode,
+        token,
+      }));
+      log(`[叫醒] 第 ${attempt} 次已投递（第 ${elapsedMin} 分钟）`);
+    } catch (error) {
+      log(`[叫醒] 第 ${attempt} 次投递失败：${error?.message ?? error}`);
+    }
+    if (wakeCall === state) {
+      state.timer = setTimeout(() => { void wakeCallTick(); }, state.everyMin * 60 * 1000);
+    }
   }
 
   // 实际的 DSH prompt 投递（不再直接对外暴露，统一走 promptQueues 串行队列）。
@@ -16967,6 +17035,11 @@ async function main() {
     // 统一按字符串比较：网关可能把 id 序列化成 number/string 混用，
     // 用 `===` 漏掉自己发的消息会进入正常处理（reserved2 下 AI 会回答自己 / chat 下可能回复循环）。
     if (String(event?.user_id ?? '') === String(event?.self_id ?? '')) return;
+    // 叫醒循环：被叫的人只要在私聊里冒个泡（哪怕一个字）就停。
+    if (wakeCall && String(event?.user_id ?? '') === wakeCall.uin) {
+      lastOwnerInboundAt = Date.now();
+      stopWakeCall('他回话了');
+    }
     try { await handleIncoming('private', event.user_id, event, cfg); } catch (error) { log('处理私聊消息出错:', error?.message ?? error); }
   });
   bot.onGroupMessage(async (event) => {

@@ -930,7 +930,7 @@ async function install(id, { force = false, mirror = '', jobs = 0 } = {}) {
     if (id === 'voice-cloud') {
       const conf = await readCloudConfig(id).catch(() => null);
       if (!conf || !conf.configured) {
-        throw new Error('云端包还没填密钥：先在设置页「云端包：密钥与音色」填 AppID / Access Key / 音色 ID，再启动');
+        throw new Error('云端包还没填密钥：先在设置页「云端包：密钥与音色」填 API Key（新版控制台）或 AppID + Access Key（旧版），再填音色 ID');
       }
     }
     // Python 环境缺失时直接给可操作的提示，别让用户看着"启动超时"猜。
@@ -1124,6 +1124,8 @@ async function install(id, { force = false, mirror = '', jobs = 0 } = {}) {
     };
     if (body.appId) set('cloud_app_id', body.appId);
     if (body.accessKey) set('cloud_access_key', body.accessKey);
+    // 2026-11 起火山新版控制台只发 API Key（UUID），旧 AppID/AccessKey 那一套账号里根本没有。
+    if (body.cloudApiKey) set('cloud_api_key', body.cloudApiKey);
     if (body.resource) set('cloud_resource', body.resource);
     await fsp.writeFile(file, text, 'utf8');
     if (body.speaker) {
@@ -1187,6 +1189,7 @@ async function install(id, { force = false, mirror = '', jobs = 0 } = {}) {
     const pick = (k) => (text.match(new RegExp('^' + k + '\\s*=\\s*"([^"]*)"', 'm')) || [])[1] || '';
     const appId = pick('cloud_app_id');
     const accessKey = pick('cloud_access_key');
+    const apiKey = pick('cloud_api_key');
     let speaker = '';
     try {
       const vdir = path.join(dir, 'voices');
@@ -1201,8 +1204,10 @@ async function install(id, { force = false, mirror = '', jobs = 0 } = {}) {
       appId,
       hasAccessKey: !!accessKey,
       accessKeyMasked: accessKey ? accessKey.slice(0, 4) + '****' + accessKey.slice(-4) : '',
+      // 新版控制台：只有 API Key，没有 AppID/AccessKey。有它就算配置齐全。
+      hasApiKey: !!apiKey,
       speaker,
-      configured: !!appId && !!accessKey && !!speaker,
+      configured: !!speaker && (!!apiKey || (!!appId && !!accessKey)),
     };
   }
 

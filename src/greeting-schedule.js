@@ -87,6 +87,50 @@ export function pickGreetingTheme(random = Math.random, themes = GREETING_THEMES
  *   · 其它模式（chat）：桥接会把本回合的文本自动转发，只要她直接输出。
  * 另外补发时要说明「这是补发的」，免得她以为现在是早上八点。
  */
+/** 叫醒循环的默认值：每 3 分钟一次，最多叫 60 分钟（他一回话就停）。 */
+export const WAKE_CALL_DEFAULTS = Object.freeze({ everyMin: 3, maxMinutes: 60 });
+
+/**
+ * 叫醒提示词（早安发出后，他没动静就接着叫）。
+ *
+ * 为什么不在桥接里直接替他发「起床了」：那样语气是死的，也不看上下文（他可能已经回了、
+ * 或者在群里说过话了）。所以还是把「第几次、隔了多久、该怎么升级手段」的事实交给模型，
+ * 让它按人格自己决定说什么，桥接只管节奏和停止条件。
+ */
+export function buildWakeCallPrompt({
+  who = '',
+  uin = '',
+  attempt = 1,
+  elapsedMin = 0,
+  mode = 'chat',
+  token = '',
+} = {}) {
+  const target = String(who || '').trim() || `QQ ${uin}`;
+  const n = Math.max(1, Number(attempt) || 1);
+  const lines = [];
+  lines.push(`【叫醒 · 第 ${n} 次】你 ${elapsedMin} 分钟前给 ${target}（QQ ${uin}）发了早安，他一直没回。现在接着叫他起床。`);
+  lines.push(
+    '先判断一次：用 qq_get_recent_messages 看他最后一条消息。他要是其实已经回了（哪怕只回一个字、一个表情、回拍一下），'
+    + '就别再叫了，简单收尾结束回合，不要解释。',
+  );
+  lines.push('确实没回，就按第几次换手段，越往后越闹：');
+  lines.push('- 第 1~2 次：再发一句文字，换种说法，可以更命令一点，一句就够；');
+  lines.push('- 第 3~4 次：先用 qq_send_poke 戳他一下，再补一句短句；');
+  lines.push('- 第 5 次起：发语音（qq_send_voice，text 填一句话现场合成）真的喊他，再补一句文字；之后每次都要带声音。');
+  lines.push(
+    '要求：每次说的话都不能跟上一次重复；别当自己是闹钟，用你的口气催他；'
+    + '一条文字（或一条语音）+ 最多一次拍一拍，不要刷屏；不要提「定时任务」「系统提醒」。',
+  );
+  const send = `发送方式：一律真的用工具发出去 —— qq_send_message${mode === 'reserved2' ? '（或 qq_send_private_message）' : ''}`;
+  lines.push(
+    String(mode) === 'reserved2'
+      ? `${send}，userId 填 ${uin}${token ? `、token 填 ${token}` : ''}；纯文本不会自动发到 QQ，只输出文字等于没发。`
+      : `${send}，userId 填 ${uin}；不要只输出文字就结束。`,
+  );
+  lines.push('发完就停，别在回合里等他回话。');
+  return lines.join('\n');
+}
+
 export function buildMorningGreetingPrompt({
   who = '',
   uin = '',
