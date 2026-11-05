@@ -27,7 +27,10 @@ plugin_manager install_bundle target="<你的仓库路径>\plugins\surfcore"
 
 安装后重启 DSH（或让 HMR 生效），打开：
 
-**设置 → SurfCore**
+**左侧栏 → SurfCore**（中区整页打开，和原来的 **设置 → SurfCore** 是同一套界面）
+
+> 左侧栏那一行由 `sidebar.panellist` + `main` 两个槽挂上去（`lib/client.js` 的 `apply`）；
+> 宿主没有这两个槽（旧版 DSH）时自动只保留「设置 → SurfCore」入口。
 
 旧的两个 bundle（`qq-mode-console` / `dsh-bili-whale`）已并入本插件，可停用/移除；本插件已经包含 `qq-mode` 命名空间。`surfcore` 已经内置两个 QQ preset（`qq-chat` / `qq-chat-v2`）和工具守卫，不再需要单独安装 `qq-agent-presets`。
 

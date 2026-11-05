@@ -58,16 +58,19 @@ select.qbw-select option{background:var(--qbw-surface);color:var(--qbw-text)}
 
     const CSS = `
 /* 主题语义层：只用 DSH 提供的 light/dark token，组件里不再写死颜色。
-   on-brand 用 bg-base：浅色主题是浅字压深品牌色，深色主题是深字压浅品牌色。 */
-:root{
+   主按钮用 button-primary-fill 当底色、label-primary-inverted 当字色，和 DSH 自己的主按钮一致
+   （深色主题是浅底深字，浅色主题反过来）。
+   这些别名要跟着宿主 token 一起落在组件根上：DSH 把 --dsw-alias-* 挂在 body 上，
+   只在 :root 声明会让 var() 在 html 那一层就退化成浅色兜底值。 */
+:root,.qbw-app{
   --qbw-surface: var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, #ffffff));
   --qbw-surface-2: var(--dsw-alias-bg-layer-2, #f2f4f7);
   --qbw-text: var(--dsw-alias-label-primary, #1f2328);
   --qbw-muted: var(--dsw-alias-label-secondary, #5b6472);
   --qbw-line: var(--dsw-alias-border-l2, #d0d5dd);
   --qbw-line-soft: var(--dsw-alias-border-l1, #e3e6ee);
-  --qbw-brand: var(--dsw-alias-brand-primary, #2f6fed);
-  --qbw-on-brand: var(--dsw-alias-bg-base, #ffffff);
+  --qbw-brand: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #2f6fed));
+  --qbw-on-brand: var(--dsw-alias-label-primary-inverted, #ffffff);
   --qbw-hover: rgba(127,127,127,.12);
   --qbw-ok: var(--dsw-alias-state-success-primary, #2fbf71);
   --qbw-warn: var(--dsw-alias-state-warn-primary, #b97800);
@@ -77,7 +80,7 @@ select.qbw-select option{background:var(--qbw-surface);color:var(--qbw-text)}
   --qbw-err-text: var(--qbw-err);
 }
 @supports (color: color-mix(in srgb, #000 50%, #fff)){
-  :root{
+  :root,.qbw-app{
     --qbw-ok-text: color-mix(in srgb, var(--qbw-ok) 70%, var(--qbw-text));
     --qbw-warn-text: color-mix(in srgb, var(--qbw-warn) 55%, var(--qbw-text));
     --qbw-err-text: color-mix(in srgb, var(--qbw-err) 85%, var(--qbw-text));
@@ -251,6 +254,10 @@ select.qbw-select option{background:var(--qbw-surface);color:var(--qbw-text)}
 .qbw-budget-note .qbw-hint{max-width:760px;line-height:18px}
 .qbw-budget-note .qbw-btn{flex:0 0 auto}
 @media(max-width:860px){.qbw-budget-grid{grid-template-columns:1fr}.qbw-budget-meters{grid-template-columns:1fr}}
+/* 左侧栏面板宿主：铺满中区，卡片自己撑满高度，底栏（保存）始终可见 */
+.qbw-panelhost{box-sizing:border-box;height:100%;min-height:0;display:flex;flex-direction:column;padding:calc(28px + var(--dsh-frame-top-clearance,0px)) 24px 20px}
+.qbw-panelhost>.qbw-app{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:0;max-height:none;background:color-mix(in srgb,var(--dsw-alias-bg-layer-1,#ffffff) 92%,transparent)}
+@media(max-width:760px){.qbw-panelhost{padding:calc(16px + var(--dsh-frame-top-clearance,0px)) 12px 12px}}
 `;
 
     // ── 基础工具 ────────────────────────────────────────────────────────────
@@ -6833,6 +6840,21 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
     const inject = ["slots"];
     const NS = "surfcore";
 
+    // 左侧栏入口的图标：16px 单色小鲸鱼（与包里的 icon.svg 同一母题，缩到侧栏尺寸画）。
+    function SurfCoreMark({ size = 16 }) {
+      return h("svg", {
+        width: size,
+        height: size,
+        viewBox: "0 0 16 16",
+        fill: "none",
+        xmlns: "http://www.w3.org/2000/svg",
+        "aria-hidden": "true",
+      },
+        h("path", { d: "M2.9 9.5c2-1.5 3.5-1.5 5.5-.3 1 .5 1.8.75 2.7.5.7-.2 1.2-.7 1.7-1.2v2.6c-2.5 1.5-5.6 1.7-8.3.25-.8-.45-1.3-1-1.6-1.85z", fill: "currentColor" }),
+        h("path", { d: "M11.1 7.7c-.8-1.2-.5-2.3.3-3.1.25 1.3.75 1.8 1.6 2.05-.8.25-1.4.55-1.9 1.05z", fill: "currentColor" }),
+        h("path", { d: "M3.6 4.4c1.5-.85 2.9-.85 4.1.1", stroke: "currentColor", strokeWidth: "1.3", strokeLinecap: "round", opacity: "0.6" }));
+    }
+
     function apply(ctx) {
       ctx.effect(
         () =>
@@ -6845,11 +6867,38 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           ),
         "surfcore: settings section",
       );
+      // 左侧栏：面板列表里的一行（图标 + 名字），点开在中区渲染同一套设置界面。
+      // 只有宿主声明了 sidebar.panellist（把面板列表搬进左侧栏的版本）才挂，旧宿主自动跳过。
+      ctx.effect(
+        () =>
+          ctx.slots.inject("sidebar.panellist", () =>
+            ctx.slots.register(
+              { name: "sidebar.panellist", id: NS, order: 5, label: () => NAMES.nav },
+              (owner = {}) => h(SurfCoreMark, { size: owner.size ?? 16 }),
+            ),
+            "surfcore: sidebar row",
+          ),
+        "surfcore: sidebar row",
+      );
+      // 中区面板：侧栏那一行选中的就是它（main 按 sidebar entry id 派发）。
+      // main 由布局条目在自己的 children 表里声明，比客户端插件启动晚，所以等声明出来再注册。
+      ctx.effect(
+        () =>
+          ctx.slots.inject("main", () =>
+            ctx.slots.register(
+              { name: "main", key: NS },
+              () => h("div", { className: "qbw-panelhost" }, h(QQBIliWhaleSection, null)),
+            ),
+            "surfcore: sidebar panel",
+          ),
+        "surfcore: sidebar panel",
+      );
     }
 
     exports.apply = apply;
     exports.inject = inject;
     exports.QQBIliWhaleSection = QQBIliWhaleSection;
+    exports.SurfCoreMark = SurfCoreMark;
     exports.QQ_FIELDS = QQ_FIELDS;
     exports.BILI_FIELDS = BILI_FIELDS;
     exports.QQ_BILI_SHARE_FIELDS = QQ_BILI_SHARE_FIELDS;
