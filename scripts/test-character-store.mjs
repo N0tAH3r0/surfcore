@@ -117,6 +117,20 @@ assert.equal(fs.existsSync(path.join(legacyMemory, 'memory-card.json')), true, '
 assert.ok(migrated.backupDir && fs.existsSync(migrated.backupDir), '迁移必须留备份目录');
 assert.equal(store2.migrateLegacy({ personaFile: legacyPersona, memoryDir: legacyMemory, biliDir: legacyBili }).skipped, true, '迁移必须幂等');
 
+// 3) 改人格卡前的备份：同一秒里连改两次也要各留一版（曾经撞时间戳就吞掉第二版）
+{
+  store.switchCharacter(a.character.id);
+  // 固定同一个 now：保证两次备份时间戳完全一样，跨秒才不会掩盖问题
+  const fixedNow = Date.now();
+  store.updateCharacter(a.character.id, { personaText: '# 备份测试 第一版', now: fixedNow });
+  store.updateCharacter(a.character.id, { personaText: '# 备份测试 第二版', now: fixedNow });
+  const backups = fs.readdirSync(store.PERSONA_BACKUP_DIR).filter((name) => name.includes('-改前'));
+  assert.ok(backups.length >= 2, `连改两次要留两版备份，实际 ${backups.join(', ')}`);
+  const texts = backups.map((name) => fs.readFileSync(path.join(store.PERSONA_BACKUP_DIR, name), 'utf8'));
+  assert.ok(texts.some((text) => text.includes('备份测试 第一版')), '第一版必须被备份下来');
+  assert.ok(fs.existsSync(path.join(store.PERSONA_BACKUP_DIR, 'index.md')), '备份目录要有 index.md');
+}
+
 for (const dir of [tempHome, legacyHome, migrationHome]) {
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
 }

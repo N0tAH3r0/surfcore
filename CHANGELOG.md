@@ -1,3 +1,18 @@
+## [未发布] - 2026-11-06
+
+### 新增
+
+- 模型请求静默挂起时的界面提示（看门狗）：连续 120 秒没有新正文就在右下角提示"这一轮可能卡住了"，建议手动停止；只提醒、不自动中止。工具执行阶段不提示；QQ 桥接会话与子代理在 `session/event` 里学到归属后不提示。
+- 宿主新增 `GET /dsh-surfcore/api/stall` 暴露当前提醒快照；客户端 `StallNotice` 组件挂在 `shell.overlay`，刷新页面后生效。详见 `docs/cases/2026-11-06-model-stall-notice.md`。
+
+### 修复
+
+- 看门狗不再漏内存：`end` 帧以前只给 attempt 打 `ended` 标记，长会话下 `attempts` 与 `tracked` 只增不减；现在 end 即删除，`tick()` 还会按保留期回收「end 丢了」的残留 attempt，以及跑完够久的会话记录。
+- 修好后台会话过滤：宿主发 `agent/assistant-stream` 时 payload 只有 `{ frame }`（没有 `agent`/`session`），原作者按 `agent.session` 判前后台的逻辑从来没生效过（事故复盘里 QQ 会话被误报就是这么来的）。现在从 `session/event` 里学「这个 sessionId 是 QQ/子代理」，再过滤只带 frame 的流事件。
+- 人格卡改稿备份：同一秒内连续保存会撞文件名，旧逻辑 `existsSync` 命中就返回，等于这一版没备份；现在撞名加序号。备份目录也只保留最近 200 版。
+- `scripts/merge-memory.mjs`：目标角色还没生成记忆目录时 `readdirSync` 抛 ENOENT 会整次合并中断；现在跳过备份继续合并。
+- 新增测试：`test-stall-watch` 补「只有 frame 也要跟踪」「学会后台后不跟踪」「50 轮 start/end 不涨表」三组；`test-character-store` 补同秒两次保存必须留两份备份。
+
 ## [0.8.8] - 2026-11-03
 
 ### 修复

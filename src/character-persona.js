@@ -81,6 +81,78 @@ function atomicWriteJson(file, value) {
   }
 }
 
+function atomicWriteText(file, text, mode = 0o600) {
+  ensureDir(path.dirname(file));
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, text, { encoding: 'utf8', mode });
+    fs.renameSync(tmp, file);
+  } catch (error) {
+    try { fs.unlinkSync(tmp); } catch {}
+    throw error;
+  }
+}
+
+/** 人格卡改稿备份：人可以直接翻的独立目录（不是只给程序看的快照）。 */
+export const PERSONA_BACKUP_DIR = path.join(SURFCORE_DIR, '人格卡备份');
+
+function stampOf(now) {
+  const d = new Date(now);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/** 备份目录只保留最近这么多版，多了按修改时间丢最旧的（人格卡一天改不了几次，200 版够翻）。 */
+export const PERSONA_BACKUP_KEEP = 200;
+
+function prunePersonaBackups(keep = PERSONA_BACKUP_KEEP) {
+  try {
+    const files = fs.readdirSync(PERSONA_BACKUP_DIR)
+      .filter((name) => name.endsWith('-改前.md') || /-改前-\d+\.md$/.test(name))
+      .map((name) => {
+        const file = path.join(PERSONA_BACKUP_DIR, name);
+        const stat = fs.statSync(file);
+        return { file, at: stat.mtimeMs };
+      })
+      .sort((a, b) => b.at - a.at);
+    for (const item of files.slice(keep)) {
+      try { fs.rmSync(item.file, { force: true }); } catch { /* 删不掉就留着，下次再试 */ }
+    }
+  } catch { /* 备份目录不存在或读不了，忽略 */ }
+}
+
+/**
+ * 覆盖人格卡之前，把上一版原样存到 `surfcore/人格卡备份/<卡名>-<时间>-改前.md`，
+ * 并在同目录 index.md 记一行。失败不影响保存（备份是保险，不是前置条件）。
+ */
+function backupPersonaBeforeEdit(id, manifest, now) {
+  try {
+    const src = characterPaths(id).persona;
+    if (!fs.existsSync(src)) return null;
+    const text = fs.readFileSync(src, 'utf8');
+    if (!text.trim()) return null;
+    ensureDir(PERSONA_BACKUP_DIR);
+    const safe = String(manifest?.name || id).replace(/[\\/:*?"<>|\r\n\t]/g, '_').slice(0, 40);
+    // 同一秒里连按两次保存（或批量改多张卡）时，时间戳会撞；
+    // 以前撞了就 existsSync 直接返回，等于这一版没备份，这里改成加序号。
+    const base = `${safe}-${stampOf(now)}-改前`;
+    let file = path.join(PERSONA_BACKUP_DIR, `${base}.md`);
+    for (let n = 2; fs.existsSync(file) && n < 100; n += 1) {
+      file = path.join(PERSONA_BACKUP_DIR, `${base}-${n}.md`);
+    }
+    atomicWriteText(file, text);
+    const index = path.join(PERSONA_BACKUP_DIR, 'index.md');
+    if (!fs.existsSync(index)) {
+      fs.writeFileSync(index, '# 人格卡改稿备份\n\n每次保存人格卡前，自动把上一版原样存到这里。文件名 = 卡名-时间-改前.md。\n\n', { encoding: 'utf8' });
+    }
+    fs.appendFileSync(index, `- ${new Date(now).toLocaleString('zh-CN', { hour12: false })} · ${safe}（${id}）· ${path.basename(file)}\n`, { encoding: 'utf8' });
+    prunePersonaBackups();
+    return file;
+  } catch {
+    return null;
+  }
+}
+
 function copyFile(src, dest) {
   if (!fs.existsSync(src)) return false;
   ensureDir(path.dirname(dest));
@@ -439,7 +511,11 @@ export function updateCharacter(id, { name, personaText, memoryCard, now = Date.
   const manifest = readManifest(id);
   if (!manifest) throw new Error(`角色不存在：${id}`);
   if (typeof personaText === 'string') {
-    fs.writeFileSync(paths.persona, `${personaText.trim()}\n`, { encoding: 'utf8', mode: 0o600 });
+    const nextText = `${personaText.trim()}\n`;
+    let prevText = '';
+    try { prevText = fs.readFileSync(paths.persona, 'utf8'); } catch {}
+    if (prevText !== nextText) backupPersonaBeforeEdit(id, manifest, now);
+    atomicWriteText(paths.persona, nextText);
   }
   if (memoryCard && typeof memoryCard === 'object') atomicWriteJson(paths.memoryJson, memoryCard);
   const next = {

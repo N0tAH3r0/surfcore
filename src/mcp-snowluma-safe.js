@@ -333,6 +333,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_memory_clear: 'memory',
   qq_slang_query: 'slangQuery',
   qq_slang_submit: 'slangSubmit',
+  qq_diary_search: 'diarySearch',
   qq_send_voice: 'sendVoice',
   qq_list_voices: 'sendVoice',
   // 下面这些曾经漏登记。漏一个不是"多注册一个工具"那么轻：桥接那边按 `v2ToolEnabled(flag)`
@@ -1085,6 +1086,28 @@ server.tool(
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `提交黑话失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_diary_search',
+  '翻看你自己以前写的日记（只读）。日记是每周用你的口吻写的周记，平时提示词里只会带最近一篇的开头和结尾；想看更细、更早的内容时用这个按关键词查。不传 q 就返回最近一篇的段落。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().min(1).describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    q: z.string().optional().describe('关键词，可空格分隔多个词（全部命中才返回）；不传则看最近一篇'),
+    limit: z.number().optional().describe('最多返回几段，默认 5，最多 20')
+  },
+  async ({ key, token, q, limit }) => {
+    try {
+      const params = new URLSearchParams({ key });
+      if (q) params.set('q', String(q));
+      if (limit) params.set('limit', String(limit));
+      const data = await agentApi(`/api/socialV2/diary/search?${params.toString()}`, { headers: { 'x-agent-token': token } });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `翻日记失败：${error?.message ?? error}` }], isError: true };
     }
   }
 );

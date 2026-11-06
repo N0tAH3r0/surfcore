@@ -95,6 +95,7 @@ import { summarizeQqFishGuard } from './qq-fish-guard.js';
 import { applySessionPermission } from './scheduler.js';
 import { fileStamp, isStale } from '../../../src/config-stamps.js';
 import { createContextTelemetry } from '../../../src/context-telemetry.js';
+import { createStallWatch } from './stall-watch.js';
 import { createBillingService } from './billing.js';
 import { createPersonaClassifier } from './persona-classify.js';
 
@@ -238,6 +239,24 @@ export function apply(ctx) {
     source: 'plugin',
     log: (message) => pluginLog(message),
   });
+  // ── 卡死提醒看门狗（2026-11-06，用户要求"只提醒不中止"）──────────────
+  // 背景：长会话的模型请求可能在吐出第一个 chunk 后静默挂起，连接上只剩 SSE 心跳；
+  // streamIdleTimeoutMs 会被心跳续命，assistant/message 又要等整段结束才落盘，
+  // 所以宿主和界面都看不出"这一轮已经很久没出字"。判据只看 chunk 帧：连续
+  // 120 秒没有新 chunk 就记一条提醒，界面轮询 /stall 显示"可能卡住了，建议停止"。
+  const stallWatch = createStallWatch({ log: (...args) => pluginLog(...args) });
+  let stallStreamOff = null;
+  try {
+    if (typeof ctx.on === 'function') {
+      stallStreamOff = ctx.on('agent/assistant-stream', (payload) => {
+        try { stallWatch.trackStream(payload); }
+        catch (error) { pluginLog('卡死看门狗处理流事件失败：', String(error?.message ?? error).slice(0, 160)); }
+      });
+      stallWatch.start();
+    }
+  } catch (error) {
+    pluginLog('卡死看门狗订阅失败：', String(error?.message ?? error));
+  }
   // A+B 账单：每 10 分钟刷新到 ~/.dsh/surfcore/billing；只读，不调用模型。
   const personaClassifier = createPersonaClassifier({ ctx, log: (message) => pluginLog(message), tokenBudget });
 
@@ -330,6 +349,8 @@ export function apply(ctx) {
       sessionEventOff = ctx.on('session/event', (session, event) => {
         try { tokenBudget.ingestEvent(session, event); }
         catch (error) { pluginLog('token 用量采集失败：', String(error?.message ?? error).slice(0, 160)); }
+        try { stallWatch.noteSessionEvent(session, event); }
+        catch (error) { pluginLog('卡死看门狗处理会话事件失败：', String(error?.message ?? error).slice(0, 160)); }
         try {
           if (tokenBudget.isTrackedSession(session)) contextTelemetry.ingestEvent(session, event);
         } catch (error) { pluginLog('上下文遥测失败：', String(error?.message ?? error).slice(0, 160)); }
@@ -3633,6 +3654,14 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
       json(res, 405, { ok: false, code: 'GATE_EVENTS_METHOD', error: '只支持 GET / POST', hint: '刷新页面后重试' });
       return;
     }
+    if (pathname === `${API_PREFIX}/stall`) {
+      if (req.method !== 'GET') {
+        json(res, 405, { ok: false, code: 'STALL_METHOD', error: '只支持 GET', hint: '刷新页面后重试' });
+        return;
+      }
+      json(res, 200, stallWatch.snapshot());
+      return;
+    }
     if (pathname === `${API_PREFIX}/diagnostics`) { await handleDiagnostics(req, res); return; }
     if (pathname === `${API_PREFIX}/bridge`) { await handleBridge(req, res); return; }
     if (pathname.startsWith(`${API_PREFIX}/purpose`)) { await handlePurpose(req, res, url); return; }
@@ -3723,6 +3752,8 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
     try { petPurpose.stop?.(); } catch {}
     if (petHostTimer) clearInterval(petHostTimer);
     try { sessionEventOff?.(); } catch {}
+    try { stallStreamOff?.(); } catch {}
+    try { stallWatch.dispose(); } catch {}
     try { billing.dispose(); } catch {}
     try { tokenBudget.dispose(); } catch {}
     try { memoryCardTimer?.stop?.(); } catch {}

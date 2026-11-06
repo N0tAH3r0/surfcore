@@ -403,6 +403,8 @@ export function closurePromptBlock(assessment, { record = null, now = Date.now()
   const openText = s.openLoops > 0 ? '有未答的提问/请求' : '没有未答的提问';
   lines.push(`- 未完成：${openText}。判断：${VERDICT_ADVICE[assessment.verdict] ?? '继续观察'}。`);
   lines.push('如果判断可以收尾：不要再补一句，调用 qq_close_conversation（可留 summary / nextOpening）。这不是潜水，不用沉睡前观察；对方再找你、开新话题仍会照常醒。如果还要聊就正常回；只是等对方补充，用 qq_wait_for_messages(purpose="reply")。不要用收尾逃避提问/求助，也不要每轮都收尾。');
+  lines.push('收尾的门槛比"接不下去"更高：只有出现明确的结束信号才算收尾——对方道别/说要去忙/说晚安，或者话题已经闭环且对方连续两轮没接新话。对方还在吐槽、接梗、补话、刚说完"对了/话说"时，不要收尾。');
+  lines.push('刚回过一句时先别急着收尾：桥接会在 45 秒后自动回看一次，那时对方没有新话再收也不迟；收早了，他后面补的那句吐槽就没人接了。');
   if (record && record.at) {
     if (record.reopenedAt && now - Number(record.reopenedAt) < 10 * 60 * 1000) {
       lines.push(`上次这段刚收过尾，现在对方又开口了：这是新的开始，别复读上次的结尾。${formatClosureRecord(record, now)}`);

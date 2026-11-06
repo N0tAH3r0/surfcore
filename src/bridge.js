@@ -3141,6 +3141,100 @@ async function main() {
       .map(publicSlangEntry);
   }
 
+  // 她自己的日记：只带最近一篇的尾部若干字符，够她"想起来"就停，不整篇塞。
+  // 目录 SURFCORE_DIR/日记/*.md 与人看的备份同级；injectChars=0 可关。
+  let diaryCache = { key: '', block: '' };
+  // 按句子切分，避免截在半个句子里。
+  function diarySentences(text) {
+    return String(text).match(/[^。！？!?…\n]+[。！？!?…]*\s*\n*/g) || [String(text)];
+  }
+  function diaryExcerpt(text, budget) {
+    const src = String(text).trim();
+    if (src.length <= budget) return src;
+    const headBudget = Math.max(40, Math.floor(budget * 0.6));
+    const tailBudget = Math.max(40, budget - headBudget);
+    const sentences = diarySentences(src);
+    let head = '';
+    for (const s of sentences) {
+      if (head.length + s.length > headBudget && head) break;
+      head += s;
+    }
+    let tail = '';
+    for (let i = sentences.length - 1; i >= 0; i -= 1) {
+      const s = sentences[i];
+      if (tail.length + s.length > tailBudget && tail) break;
+      tail = s + tail;
+    }
+    if ((head + tail).length >= src.length - 10) {
+      // 一整篇都很短就整段给；但万一整篇只有一句话（没有句号/换行），上面那个
+      // head 循环会把整句全吞进去，这里再兜一刀，别把上万字塞进上下文。
+      const whole = String(src);
+      return whole.length <= budget + 60 ? whole : `${whole.slice(0, budget + 40)}…`;
+    }
+    const block = `${head.trim()}\n……（中间略）……\n${tail.trim()}`;
+    return block.length <= budget + 60 ? block : block.slice(0, budget + 60);
+  }
+  function latestDiaryBlock() {
+    const chars = Math.max(0, Math.min(2000, Number(cfg.socialV2?.diary?.injectChars ?? 500) || 0));
+    if (!chars || cfg.socialV2?.diary?.enabled === false) return '';
+    try {
+      const dir = path.join(SURFCORE_DIR, '日记');
+      const files = fs.readdirSync(dir).filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f)).sort();
+      if (!files.length) return '';
+      const file = files[files.length - 1];
+      const full = path.join(dir, file);
+      const st = fs.statSync(full);
+      const key = `${file}:${st.mtimeMs}:${chars}`;
+      if (diaryCache.key === key) return diaryCache.block;
+      const text = fs.readFileSync(full, 'utf8').trim();
+      if (!text) return '';
+      const body = diaryExcerpt(text, chars);
+      const block = `【我自己写过的日记 · ${file.replace(/\.md$/, '')}】\n（这是你以前写的，当作回忆看，不要当成新对话；想看更早、更细的，用 qq_diary_search 按关键词翻${body.length < text.length ? '。这篇太长，这里只给了开头和结尾' : ''}）\n${body}`;
+      diaryCache = { key, block };
+      return block;
+    } catch {
+      return '';
+    }
+  }
+
+  // 关键词翻日记：按段落匹配，返回最近的若干段（给 qq_diary_search 用）。
+  function diaryFileList() {
+    try {
+      return fs.readdirSync(path.join(SURFCORE_DIR, '日记'))
+        .filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
+        .sort()
+        .reverse();
+    } catch {
+      return [];
+    }
+  }
+
+  function searchDiaryV2(query, limit = 5) {
+    const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+    const files = diaryFileList().slice(0, 120);
+    const out = [];
+    for (const file of files) {
+      let text = '';
+      try { text = fs.readFileSync(path.join(SURFCORE_DIR, '日记', file), 'utf8'); } catch { continue; }
+      const paragraphs = text.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+      for (const p of paragraphs) {
+        const low = p.toLowerCase();
+        let score = 0;
+        for (const t of terms) if (low.includes(t)) score += 1;
+        if (terms.length && score < terms.length) continue;
+        out.push({
+          date: file.replace(/\.md$/, ''),
+          score,
+          text: p.length > 260 ? `${p.slice(0, 260)}…` : p,
+        });
+      }
+      if (out.length > 300) break;
+    }
+    out.sort((a, b) => (b.score - a.score) || (a.date < b.date ? 1 : -1));
+    const cap = Math.max(1, Math.min(20, Number(limit) || 5));
+    return { total: out.length, results: out.slice(0, cap) };
+  }
+
   function withSlangContext(promptText) {
     const now = new Date();
     const timeLine = `【当前时间】${now.toLocaleString('zh-CN', { hour12: false })}（${Intl.DateTimeFormat().resolvedOptions().timeZone}）`;
@@ -3149,6 +3243,8 @@ async function main() {
       const block = buildSlangContext(slangEntries, cfg.slang?.injectMax ?? 8);
       if (block) parts.push(block);
     }
+    const diary = latestDiaryBlock();
+    if (diary) parts.push(diary);
     return parts.join('\n\n') + '\n\n' + promptText;
   }
 
@@ -8966,6 +9062,19 @@ async function main() {
           });
           return;
         }
+        // ── 她的日记：按关键词翻（reserved2）────────────────────────────────
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/diary/search') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          const q = String(url.searchParams.get('q') ?? '').trim();
+          const limit = Number(url.searchParams.get('limit') ?? 5);
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('diarySearch')) { sendJson({ ok: false, error: '工具未启用：qq_diary_search' }, 403); return; }
+          const found = searchDiaryV2(q, limit);
+          sendJson({ ok: true, key, query: q, total: found.total, results: found.results });
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/slang/submit') {
           const body = await readBody();
           const key = String(body.key ?? '').trim();
@@ -11959,14 +12068,14 @@ async function main() {
    * 群聊：只有直接叫到/引用/提问/道别才重开，普通闲聊不打断冷却 ——
    *       否则「收尾冷却」等于没设，还是会每句都醒。
    */
-  function noteClosureReopenV2(key, st, { plain, text, quoteSelf = false, directAddress = false, media = [] } = {}) {
+  function noteClosureReopenV2(key, st, { plain, text, quoteSelf = false, directAddress = false, media = [], isOwner = false } = {}) {
     if (!st?.closure) return false;
     const cls = classifyMessage({
       plain: plain ?? text, text: text ?? plain,
       quoteSelf, atSelf: directAddress, media,
     });
     const isPrivate = String(key ?? '').startsWith('private:');
-    const reopen = isPrivate || directAddress || quoteSelf || ['question', 'request', 'ending'].includes(cls.kind);
+    const reopen = isPrivate || isOwner || directAddress || quoteSelf || ['question', 'request', 'ending'].includes(cls.kind);
     if (!reopen) return false;
     st.closure = reopenClosure(st.closure, { reason: cls.kind, now: Date.now() });
     return true;
@@ -14310,8 +14419,35 @@ async function main() {
     return { ...tier, name: meta?.name || '', memberCount: meta?.memberCount || 0, activityCount };
   }
 
-  function evaluateWakeTriggerV2(key, st, event, kind, textContent, plainContent, quoteTargetIsSelf) {
+  function evaluateWakeTriggerV2(key, st, event, kind, textContent, plainContent, quoteTargetIsSelf, isOwner = false) {
     if (kind === 'private') return 'private';
+    // 主人开口（群里没 @ 也算）：只在「刚聊过」的窗口内叫醒她——
+    // 刚说完话/刚收尾的 3 分钟内，主人接着补的那句吐槽她会接；
+    // 过了这个窗口就退回普通规则（要 @、叫名字、提问或概率），
+    // 否则她每句都接，反而不像真人。
+    if (isOwner) {
+      const OWNER_FOLLOWUP_MS = 3 * 60 * 1000;
+      const lastActive = Math.max(Number(st.lastActionAt) || 0, Number(st.closure?.at) || 0);
+      if (lastActive > 0 && Date.now() - lastActive <= OWNER_FOLLOWUP_MS) {
+        // 主人在接别人的话时别插嘴：这句紧跟群友的消息、又没 @/叫她名字/引用她，
+        // 多半是在回那个人（2026-11-06「你刚醒?」被误当成问她）。
+        const atSelf = atInfo(event?.message, [event?.self_id, selfUserId]).atSelf;
+        const named = selfNickname
+          ? String(plainContent ?? '').toLowerCase().includes(String(selfNickname).toLowerCase())
+          : false;
+        const prevOther = Array.isArray(st.recentMessages)
+          ? [...st.recentMessages].reverse().find((m) => m && !m.isOwner && Number(m.time) > 0)
+          : null;
+        const rightAfterOther = prevOther && Date.now() - Number(prevOther.time) <= 90 * 1000;
+        // 紧跟群友发言、又没点名她：多半是在回那个人。不直接忽略——把她叫醒
+        // 让她自己看一眼再决定，代价是一次短回合；这样「没 @ 也能聊」和
+        // 「别抢别人的话」都不牺牲。
+        if (!atSelf && !named && !quoteTargetIsSelf && rightAfterOther) {
+          return `ownerJudge:${String(prevOther.sender || '').slice(0, 20)}`;
+        }
+        return 'owner';
+      }
+    }
     const tr = st.wakeConfig?.triggers ?? {};
     const groupProfileNow = groupProfile(key, st);
     const large = groupProfileNow.large;
@@ -14738,6 +14874,13 @@ async function main() {
     if (reason === 'poke') {
       return `${base}【唤醒】${key}\n原因：有人拍了一拍（可能拍了你，也可能拍了别人）。\n先看未读/最近消息里的 [拍一拍] 事件：如果是拍你，可以自然回应一句，也可以用 qq_send_poke 回一个拍一拍；如果是拍别人，觉得有趣也可以接梗。除了回应，偶尔也可以主动戳一下正在聊的人/熟人，像真人手贱/提醒/逗一下，但别频繁。不想接就安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
     }
+    if (String(reason ?? '').split(':')[0] === 'ownerJudge') {
+      const prevName = String(reason ?? '').split(':').slice(1).join(':') || '某个群友';
+      return `${base}【唤醒】${key}\n原因：主人在群里说了一句，紧跟在 ${prevName} 的发言后面，也没点名你。\n【最重要的一步：先分清他在跟谁说话】先看最近几条消息：如果这句是在回 ${prevName}、回答对方的问题、说对方的事——那不是在跟你说话，**不要插嘴**，直接 qq_mark_read 收尾（或 qq_set_wake_config 继续潜水），不用解释。如果他其实是在接你刚才说的事、或者问的就是你，再正常回。判断不出来就不接：这种时候少说一句，比抢了别人的话要自然得多。\n【引用：只在必要时用】只有你这条消息指向的人或消息并非最新一条别人的消息时，才用 qq_reply 或 qq_send_message 的 replyToMessageId 指向具体那条。`;
+    }
+    if (String(reason ?? '').split(':')[0] === 'owner') {
+      return `${base}【唤醒】${key}\n原因：主人在群里说了一句，没点名你（因为离你刚说过话不远，桥接叫你看一眼）。\n【先分清对象，别抢别人的话】先看未读/最近几条：他这句是在接谁？如果紧挨着某个群友的消息、在回答对方的问题、或者说的是对方的事——那话是对那个人说的，**不要插嘴**，直接 qq_mark_read 收尾（或 qq_set_wake_config 继续潜水）。只有确实冲你来、或者你能顺着接一句而且不打断他们，才开口。不确定就不接，没人会因为你少说一句觉得奇怪。\n【引用：只在必要时用】只有你这条消息指向的人或消息并非最新一条别人的消息，或者你连续的几句话中不同消息指代的是不同的消息或人时，才用 qq_reply 或 qq_send_message 的 replyToMessageId 指向具体那条。`;
+    }
     return `${base}【唤醒】${key}\n原因：${reason}\n【行动前】先判断：群里在聊什么？热闹还是冷清？有没有人直接找你？对方说完了吗？你有没有真正想说的？\n如果群聊正热但没人叫你，可以插一句有趣的/相关的，插不上再看情况潜水；不要一上来就划走。\n【引用：只在必要时用】只有你这条消息指向的人或消息并非最新一条别人的消息，或者你连续的几句话中不同消息指代的是不同的消息或人时，才用 qq_reply 或 qq_send_message 的 replyToMessageId 指向具体那条；其他情况不要引用，别让对方猜。\n你可以调用工具查看未读消息、人设、状态，自行决定是否发言；决定潜水前必须按上面的【沉睡前强制等待】先等够观察窗口。开口前先看【对话收尾判断】：判断这段已自然结束时，不用再补一句，直接 qq_close_conversation 收尾。`;
   }
 
@@ -15024,6 +15167,11 @@ async function main() {
 
   const WAKE_PRIORITY = {
     private: 100,
+    // 主人本人紧接着说的那句（群里不用 @）：只在刚聊过的 3 分钟窗口内生效，
+    // 优先级压在中位，免得和 @ / 叫名字抢话。
+    owner: 60,
+    // 主人紧跟群友说的那句：叫醒她只为了「看一眼是不是冲我来的」，优先级最低。
+    ownerJudge: 45,
     atMention: 90,
     question: 80,
     speaker: 75,
@@ -15912,14 +16060,14 @@ async function main() {
       // 对方又开口：上次的收尾记录保留，但标记为「已重开」（下次提示词会说是新的开始）。
       noteClosureReopenV2(key, st, {
         plain: plainContent, text: textContent,
-        quoteSelf: quoteTargetIsSelf, directAddress: directed, media: mediaList,
+        quoteSelf: quoteTargetIsSelf, directAddress: directed, media: mediaList, isOwner,
       });
       if (!st.bootstrapSent) {
         st.bootstrapSent = true;
         saveSocialV2State();
         scheduleWakeV2(key, 'bootstrap');
       } else {
-        const reason = evaluateWakeTriggerV2(key, st, event, kind, textContent, plainContent, quoteTargetIsSelf);
+        const reason = evaluateWakeTriggerV2(key, st, event, kind, textContent, plainContent, quoteTargetIsSelf, isOwner);
         if (reason) {
           // 收尾后的软冷却只压普通概率唤醒；@/名字/提问/关键词/指定成员/私聊照常醒。
           if (closureSuppressesWake(st.closure, reason, Date.now())) {

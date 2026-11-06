@@ -6855,6 +6855,105 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         h("path", { d: "M3.6 4.4c1.5-.85 2.9-.85 4.1.1", stroke: "currentColor", strokeWidth: "1.3", strokeLinecap: "round", opacity: "0.6" }));
     }
 
+    // ── 卡死提醒（2026-11-06，用户要求"只提醒不中止"）────────────────────
+    // 宿主侧看门狗只看"模型有没有吐新 chunk"（SSE 心跳骗不过它），连续 120 秒
+    // 没有新内容就记一条；这里每 5 秒取一次，有就贴一条可关闭的提示条。
+    // shell.overlay 是列表插槽、props 恒为 {}，所以组件自己轮询宿主，不依赖会话上下文。
+    const STALL_POLL_MS = 5000;
+    const STALL_DISMISS_MS = 10 * 60 * 1000;
+
+    function stallDuration(ms) {
+      const total = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+      if (total < 60) return total + " 秒";
+      const minutes = Math.floor(total / 60);
+      const seconds = total % 60;
+      return seconds ? minutes + " 分 " + seconds + " 秒" : minutes + " 分钟";
+    }
+
+    function StallNotice() {
+      const [stall, setStall] = useState(null);
+      const [dismissed, setDismissed] = useState(null);
+      const [clock, setClock] = useState(0);
+
+      useEffect(() => {
+        let alive = true;
+        const pull = async () => {
+          try {
+            const res = await fetch(API + "/stall", {
+              headers: { accept: "application/json" },
+              signal: AbortSignal.timeout(8000),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!alive) return;
+            setStall(Array.isArray(data && data.stalls) && data.ok !== false ? data.stalls[0] || null : null);
+          } catch {
+            // 轮询失败就安静等下一轮：提示条坏了不该影响聊天。
+          }
+        };
+        void pull();
+        const timer = setInterval(() => { void pull(); }, STALL_POLL_MS);
+        return () => { alive = false; clearInterval(timer); };
+      }, []);
+
+      const snoozed = Boolean(stall && dismissed && dismissed.id === stall.id && Date.now() - dismissed.at < STALL_DISMISS_MS);
+      const visible = Boolean(stall) && !snoozed;
+
+      useEffect(() => {
+        if (!visible) return undefined;
+        const timer = setInterval(() => setClock(Date.now()), 1000);
+        return () => clearInterval(timer);
+      }, [visible]);
+
+      if (!visible) return null;
+
+      const recovered = Number(stall.recoveredAt || 0) > 0;
+      const idleMs = clock > 0 ? Math.max(0, clock - Number(stall.since || 0)) : Number(stall.idleMs || 0);
+      const title = stall.title || "当前对话";
+      const accent = recovered
+        ? "var(--dsw-alias-state-success-primary, #4f9d69)"
+        : "var(--dsw-alias-state-warn-primary, #d9a441)";
+      const muted = "var(--dsw-alias-label-secondary, #b9b9c2)";
+      return h("div", {
+        style: {
+          position: "fixed",
+          right: "20px",
+          bottom: "104px",
+          zIndex: 2147483000,
+          width: "min(340px, calc(100vw - 40px))",
+          boxSizing: "border-box",
+          padding: "12px 14px",
+          borderRadius: "12px",
+          border: "1px solid " + accent,
+          borderLeftWidth: "4px",
+          background: "var(--dsw-alias-bg-overlay, rgba(30,30,34,0.97))",
+          color: "var(--dsw-alias-label-primary, #f2f2f5)",
+          boxShadow: "0 12px 32px rgba(0, 0, 0, 0.35)",
+          fontSize: "13px",
+          lineHeight: 1.55,
+          pointerEvents: "auto",
+        },
+        role: "status",
+        "aria-live": "polite",
+      },
+        h("div", { style: { display: "flex", alignItems: "flex-start", gap: "8px" } },
+          h("span", { "aria-hidden": "true", style: { flex: "0 0 auto", width: "8px", height: "8px", marginTop: "6px", borderRadius: "50%", background: accent } }),
+          h("strong", { style: { flex: "1 1 auto", fontSize: "13px", fontWeight: 600 } },
+            recovered ? "刚才卡了一下，已经恢复" : "这一轮可能卡住了"),
+          h("button", {
+            type: "button",
+            title: "关闭这条提醒（10 分钟内不再弹同一条）",
+            onClick: () => setDismissed({ id: stall.id, at: Date.now() }),
+            style: { flex: "0 0 auto", border: "none", background: "transparent", color: muted, cursor: "pointer", fontSize: "16px", lineHeight: 1, padding: "0 2px" },
+          }, "×")),
+        h("div", { style: { marginTop: "6px" } },
+          recovered
+            ? "「" + title + "」停了 " + stallDuration(stall.idleMs) + " 没有新内容，现在又开始出了。"
+            : "「" + title + "」已经 " + stallDuration(idleMs) + " 没有新内容，可能卡住了。"),
+        recovered ? null : h("div", { style: { marginTop: "6px", color: muted } },
+          "建议点输入框右侧的「停止」再重新发送；不想停也可以继续等，这里只是提醒。"),
+      );
+    }
+
     function apply(ctx) {
       ctx.effect(
         () =>
@@ -6893,12 +6992,26 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           ),
         "surfcore: sidebar panel",
       );
+
+      // 卡死提醒：贴在最上层浮层里，切面板也不会消失（props 恒为 {}，组件自己轮询宿主）。
+      ctx.effect(
+        () =>
+          ctx.slots.inject("shell.overlay", () =>
+            ctx.slots.register(
+              { name: "shell.overlay", id: NS + "-stall" },
+              StallNotice,
+            ),
+            "surfcore: stall notice",
+          ),
+        "surfcore: stall notice",
+      );
     }
 
     exports.apply = apply;
     exports.inject = inject;
     exports.QQBIliWhaleSection = QQBIliWhaleSection;
     exports.SurfCoreMark = SurfCoreMark;
+    exports.StallNotice = StallNotice;
     exports.QQ_FIELDS = QQ_FIELDS;
     exports.BILI_FIELDS = BILI_FIELDS;
     exports.QQ_BILI_SHARE_FIELDS = QQ_BILI_SHARE_FIELDS;

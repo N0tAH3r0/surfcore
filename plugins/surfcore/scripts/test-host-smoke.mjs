@@ -82,7 +82,7 @@ if (!apiRoute || !extRoute || !healthRoute) throw new Error('路由没有全部�
 const health = await invoke(healthRoute, 'GET', '/dsh-surfcore/health');
 console.log('health:', health.statusCode, health.body.slice(0, 200));
 
-for (const path of ['/dsh-surfcore/api/overview', '/dsh-surfcore/api/config', '/dsh-surfcore/api/persona', '/dsh-surfcore/api/memory', '/dsh-surfcore/api/memory-card', '/dsh-surfcore/api/memory-card/full', '/dsh-surfcore/api/align', '/dsh-surfcore/api/extensions', '/dsh-surfcore/api/platforms', '/dsh-surfcore/api/diagnostics', '/dsh-surfcore/api/bili/automation', '/dsh-surfcore/api/watch-history', '/dsh-surfcore/api/preferences/scan?sources=local&limit=5', '/dsh-surfcore/api/bili/fish-guard', '/dsh-surfcore/api/fish-guard/qq']) {
+for (const path of ['/dsh-surfcore/api/overview', '/dsh-surfcore/api/config', '/dsh-surfcore/api/persona', '/dsh-surfcore/api/memory', '/dsh-surfcore/api/memory-card', '/dsh-surfcore/api/memory-card/full', '/dsh-surfcore/api/align', '/dsh-surfcore/api/extensions', '/dsh-surfcore/api/platforms', '/dsh-surfcore/api/diagnostics', '/dsh-surfcore/api/bili/automation', '/dsh-surfcore/api/watch-history', '/dsh-surfcore/api/preferences/scan?sources=local&limit=5', '/dsh-surfcore/api/bili/fish-guard', '/dsh-surfcore/api/fish-guard/qq', '/dsh-surfcore/api/stall']) {
   const res = await invoke(apiRoute, 'GET', path);
   const data = JSON.parse(res.body || '{}');
   console.log(path, res.statusCode, data.ok, Object.keys(data).slice(0, 8));
@@ -113,6 +113,12 @@ for (const path of ['/dsh-surfcore/api/overview', '/dsh-surfcore/api/config', '/
       throw new Error('/overview 缺少 platformStart.{qq,bili}');
     }
     if (typeof data.scheduler?.running !== 'boolean') throw new Error('/overview 缺少 scheduler.running');
+  }
+  if (path.endsWith('/stall')) {
+    // 卡死提醒：界面每 5 秒轮询这个接口，形状变了提示条就静默消失。
+    if (data.ok !== true) throw new Error('/stall 没有返回 ok');
+    if (!Array.isArray(data.stalls)) throw new Error('/stall 缺少 stalls');
+    if (typeof data.stallMs !== 'number' || data.stallMs < 1000) throw new Error('/stall 的 stallMs 不对');
   }
   if (path.endsWith('/bili/automation')) {
     if (data.ok !== true) throw new Error('/bili/automation 没有返回 ok');
